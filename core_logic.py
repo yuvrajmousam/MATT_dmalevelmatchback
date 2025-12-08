@@ -433,7 +433,7 @@ def update_granular_with_factors(factor_rows, factor_map, granular_bytes, lower,
 def update_ads_with_factors(master_spec_bytes, ads_bytes, ads_is_csv, factor_rows, granular_df, lower, upper):
     """
     Updates the ADS file using factors and master spec mapping.
-    (Restored robust column detection logic)
+    (Includes robust dynamic header finding for Master Spec)
     """
     # --- Helper specific to this function ---
     def detect_col_by_substring(cols, substrings):
@@ -445,10 +445,13 @@ def update_ads_with_factors(master_spec_bytes, ads_bytes, ads_is_csv, factor_row
         return None
 
     # 1. Load Master Spec
-    # Use find_header_row helper to ensure we skip empty rows at the top
+    # Use find_header_row helper to ensure we skip empty rows/notes at the top
     preview = pd.read_excel(BytesIO(master_spec_bytes), sheet_name="Model Specifications", nrows=40, header=None, engine='openpyxl')
+    
+    # We look for a row that contains BOTH "variable" and "include" to be safe
     hdr_master = find_header_row(preview, ["variable", "include"])
     
+    # Reload with the correct header row
     master_df = pd.read_excel(
         BytesIO(master_spec_bytes), 
         sheet_name="Model Specifications", 
@@ -458,13 +461,13 @@ def update_ads_with_factors(master_spec_bytes, ads_bytes, ads_is_csv, factor_row
     )
     master_df.columns = [str(c).strip() for c in master_df.columns]
 
-    # --- Robust Column Mapping (Restored from Code Set 4) ---
+    # --- Robust Column Mapping ---
     col_map = {str(c).strip().lower(): c for c in master_df.columns}
     
-    # Priority lists for column names
-    preferred_var_names = ["variables", "variable", "variables_list"]
+    # Priority lists for column names based on your error log context
+    preferred_var_names = ["variables", "variable", "variables_list", "variable name"]
     preferred_include_names = ["include variables", "include variable", "include", "include_variable", "include?"]
-    preferred_pmf_names = ["post multiplication", "post_multiplication", "postmultiplication", "pmf"]
+    preferred_pmf_names = ["post multiplication", "post_multiplication", "postmultiplication", "pmf", "post-multiplication"]
 
     def pick_preferred(colmap, candidates):
         for cand in candidates:
@@ -490,8 +493,9 @@ def update_ads_with_factors(master_spec_bytes, ads_bytes, ads_is_csv, factor_row
         available = list(master_df.columns)
         raise ValueError(
             f"Could not find required columns in Master Spec.\n"
-            f"Looking for: Variable, Include, Post Multiplication.\n"
-            f"Found: {available}"
+            f"Looking for keywords: Variable, Include, Post Multiplication.\n"
+            f"Found headers at row {hdr_master}: {available}\n"
+            f"Please ensure the Master Spec has these columns."
         )
         
     var_to_pmf = {}
@@ -505,11 +509,11 @@ def update_ads_with_factors(master_spec_bytes, ads_bytes, ads_is_csv, factor_row
                 
     # 2. Load ADS
     if ads_is_csv:
-        preview = pd.read_csv(BytesIO(ads_bytes), nrows=20, header=None)
+        preview = pd.read_csv(BytesIO(ads_bytes), nrows=40, header=None)
         h = find_header_row(preview, ["quarter", "time", "geo"])
         df_ads = pd.read_csv(BytesIO(ads_bytes), header=h, dtype=object)
     else:
-        preview = pd.read_excel(BytesIO(ads_bytes), nrows=20, header=None)
+        preview = pd.read_excel(BytesIO(ads_bytes), nrows=40, header=None)
         h = find_header_row(preview, ["quarter", "time", "geo"])
         df_ads = pd.read_excel(BytesIO(ads_bytes), header=h, dtype=object)
 
