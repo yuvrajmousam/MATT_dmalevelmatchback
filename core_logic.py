@@ -49,11 +49,42 @@ def find_header_row(df_preview, keywords):
             return i
     return 0
 
+def find_header_row_preview_bytes(file_bytes, is_csv, keywords=("variable", "include"), nrows_preview=40):
+    """
+    Scans the first N rows of a file (bytes) to find the row containing specific keywords.
+    Useful for skipping 'Notes' or metadata rows at the top of Excel files.
+    """
+    bio = BytesIO(file_bytes)
+    if is_csv:
+        preview = pd.read_csv(bio, header=None, nrows=nrows_preview, dtype=str)
+    else:
+        preview = pd.read_excel(bio, header=None, nrows=nrows_preview, dtype=str, engine="openpyxl")
+
+    header_row = None
+    for i, row in preview.iterrows():
+        row_text = " ".join([str(x).lower() for x in row.values if pd.notna(x)])
+        if any(k.lower() in row_text for k in keywords):
+            header_row = i
+            break
+    if header_row is None:
+        # Fallback to 0 if not found, though usually this implies a mismatch
+        return 0
+    return header_row
+
+def detect_col_by_substring(cols, substrings):
+    """Finds a column name that contains one of the substrings (case-insensitive)."""
+    for c in cols:
+        low = str(c).lower()
+        for s in substrings:
+            if s.lower() in low:
+                return c
+    return None
+
 def get_sheet_df_dynamic(file_bytes, sheet_name, keywords_for_header=["model", "key", "geography"]):
     """Reads a specific sheet, dynamically finding the header."""
     try:
         # Read a preview to find header
-        preview = pd.read_excel(BytesIO(file_bytes), sheet_name=sheet_name, nrows=20, header=None)
+        preview = pd.read_excel(BytesIO(file_bytes), sheet_name=sheet_name, nrows=40, header=None)
         header_row = find_header_row(preview, keywords_for_header)
         
         # Read full df
@@ -435,25 +466,18 @@ def update_ads_with_factors(master_spec_bytes, ads_bytes, ads_is_csv, factor_row
     Updates the ADS file using factors and master spec mapping.
     (Includes robust dynamic header finding for Master Spec)
     """
-    # --- Helper specific to this function ---
-    def detect_col_by_substring(cols, substrings):
-        for c in cols:
-            low = str(c).lower()
-            for s in substrings:
-                if s.lower() in low:
-                    return c
-        return None
-
-    # 1. Load Master Spec
-    # Use find_header_row helper to ensure we skip empty rows/notes at the top
-    preview = pd.read_excel(BytesIO(master_spec_bytes), sheet_name="Model Specifications", nrows=40, header=None, engine='openpyxl')
+    # 1. LOAD MASTER SPEC
+    # Use find_header_row_preview_bytes helper to ensure we skip empty rows/notes at the top
+    hdr_master = find_header_row_preview_bytes(
+        master_spec_bytes,
+        is_csv=False,
+        keywords=("variable", "include"),
+        nrows_preview=40
+    )
     
-    # We look for a row that contains BOTH "variable" and "include" to be safe
-    hdr_master = find_header_row(preview, ["variable", "include"])
-    
-    # Reload with the correct header row
+    master_bio = BytesIO(master_spec_bytes)
     master_df = pd.read_excel(
-        BytesIO(master_spec_bytes), 
+        master_bio, 
         sheet_name="Model Specifications", 
         header=hdr_master,
         dtype=str, 
@@ -506,16 +530,23 @@ def update_ads_with_factors(master_spec_bytes, ads_bytes, ads_is_csv, factor_row
             p = str(r.get(pmf_col_header, "")).strip()
             if v and p:
                 var_to_pmf[v] = p
-                
-    # 2. Load ADS
+
+    # 2. LOAD ADS
+    try:
+        hdr_ads = find_header_row_preview_bytes(
+            ads_bytes,
+            is_csv=ads_is_csv,
+            keywords=("quarter", "time period", "time", "date"),
+            nrows_preview=40
+        )
+    except Exception:
+        hdr_ads = 0
+
+    ads_bio = BytesIO(ads_bytes)
     if ads_is_csv:
-        preview = pd.read_csv(BytesIO(ads_bytes), nrows=40, header=None)
-        h = find_header_row(preview, ["quarter", "time", "geo"])
-        df_ads = pd.read_csv(BytesIO(ads_bytes), header=h, dtype=object)
+        df_ads = pd.read_csv(ads_bio, header=hdr_ads, dtype=object)
     else:
-        preview = pd.read_excel(BytesIO(ads_bytes), nrows=40, header=None)
-        h = find_header_row(preview, ["quarter", "time", "geo"])
-        df_ads = pd.read_excel(BytesIO(ads_bytes), header=h, dtype=object)
+        df_ads = pd.read_excel(ads_bio, header=hdr_ads, dtype=object, engine="openpyxl")
 
     df_ads.columns = [str(c).strip() for c in df_ads.columns]
 
