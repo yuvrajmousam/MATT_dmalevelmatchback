@@ -67,7 +67,6 @@ def find_header_row_preview_bytes(file_bytes, is_csv, keywords=("variable", "inc
             header_row = i
             break
     if header_row is None:
-        # Fallback to 0 if not found, though usually this implies a mismatch
         return 0
     return header_row
 
@@ -94,7 +93,7 @@ def get_sheet_df_dynamic(file_bytes, sheet_name, keywords_for_header=["model", "
         raise ValueError(f"Error reading sheet '{sheet_name}': {str(e)}")
 
 def normalize_columns(df):
-    """Standardizes column names based on your specific map."""
+    """Standardizes column names based on specific map."""
     CANONICAL_COLS = {
         "model key": "Model Key", "modelkey": "Model Key",
         "model 3.3": "Model 3.3", "model3.3": "Model 3.3",
@@ -143,15 +142,29 @@ def dma_get_options(file_bytes, sheet_name):
         "available_types": sorted(df["Type"].dropna().astype(str).unique())
     }
 
-def dma_generate_factors(dma_file_bytes, quotes_sheet, support_sheet, 
+def dma_generate_factors(dma_file_bytes, quotes_sheet, 
                          total_file_bytes, total_sheet,
                          selected_model_keys, selected_types):
     """
     Implements the logic from Code Set 1 to generate the Factor file.
+    Includes case-insensitive sheet detection for 'Weekly Support 1'.
     """
+    # Helper to resolve sheet name case-insensitively
+    def resolve_sheet_name(xls_obj, target):
+        target_clean = target.strip().lower()
+        for s in xls_obj.sheet_names:
+            if s.strip().lower() == target_clean:
+                return s
+        return target # Return original if not found (will error later)
+
     # 1. Load DMA Data (Quotes & Support)
+    xls_dma = pd.ExcelFile(BytesIO(dma_file_bytes))
+    
+    # Detect 'Weekly Support 1' regardless of case
+    support_sheet_actual = resolve_sheet_name(xls_dma, "Weekly Support 1")
+    
     df_quotes = get_sheet_df_dynamic(dma_file_bytes, quotes_sheet)
-    df_support = get_sheet_df_dynamic(dma_file_bytes, support_sheet)
+    df_support = get_sheet_df_dynamic(dma_file_bytes, support_sheet_actual)
     
     df_quotes = normalize_columns(df_quotes)
     df_support = normalize_columns(df_support)
@@ -328,6 +341,7 @@ def dma_generate_factors(dma_file_bytes, quotes_sheet, support_sheet,
 def process_factor_file(factor_bytes, periods_to_remove=None):
     """
     Reads the Factor file, allows filtering periods, and builds lookup maps.
+    FIX: Now converts Blank/Empty factors to 1.0 (so blank * number = number).
     """
     df_factors = pd.read_excel(BytesIO(factor_bytes), sheet_name="Factors", engine="openpyxl")
     
@@ -354,10 +368,15 @@ def process_factor_file(factor_bytes, periods_to_remove=None):
         period_raw = r.get("Time Period", "")
         period_key = normalize_period_for_matching(period_raw)
         
-        try:
-            fval = float(r.get("Factor", 1))
-        except:
-            continue
+        # --- FIX: BLANK FACTOR = 1.0 ---
+        raw_factor = r.get("Factor")
+        if pd.isna(raw_factor) or str(raw_factor).strip() == "":
+            fval = 1.0  # Treat blank as 1
+        else:
+            try:
+                fval = float(raw_factor)
+            except:
+                continue # Skip if not a valid number
             
         if not var or not geo or not period_key:
             continue
@@ -387,6 +406,7 @@ def process_factor_file(factor_bytes, periods_to_remove=None):
 def update_granular_with_factors(factor_rows, factor_map, granular_bytes, lower, upper):
     """
     Updates the Granular OVERRIDE sheet based on factors.
+    FIX: Skips rows where Min or Max are empty/NaN.
     """
     wb = pd.ExcelFile(BytesIO(granular_bytes))
     
@@ -422,10 +442,17 @@ def update_granular_with_factors(factor_rows, factor_map, granular_bytes, lower,
             skipped_log.append([var, geo, contrib, f"Within tolerance ({fval:.4f})"])
             continue
             
+        # --- FIX: CHECK MIN/MAX VALIDITY ---
+        val_min = row.get("Min")
+        val_max = row.get("Max")
+        if pd.isna(val_min) or pd.isna(val_max):
+            skipped_log.append([var, geo, contrib, "Min or Max is empty"])
+            continue
+
         # Update
         try:
-            old_min = float(row.get("Min"))
-            old_max = float(row.get("Max"))
+            old_min = float(val_min)
+            old_max = float(val_max)
         except:
             skipped_log.append([var, geo, contrib, "Min/Max not numeric"])
             continue
@@ -434,8 +461,7 @@ def update_granular_with_factors(factor_rows, factor_map, granular_bytes, lower,
         df_override.at[idx, "Max"] = old_max * fval
         multiplied_log.append([var, geo, contrib, old_min, old_max, df_override.at[idx, "Min"], df_override.at[idx, "Max"], fval])
         
-    # Create Outputs (using openpyxl to preserve other sheets if possible, 
-    # but pandas ExcelWriter recreation is safer for stateless usage)
+    # Create Outputs
     output_granular = BytesIO()
     with pd.ExcelWriter(output_granular, engine='openpyxl') as writer:
         for sheet in wb.sheet_names:
@@ -464,8 +490,17 @@ def update_granular_with_factors(factor_rows, factor_map, granular_bytes, lower,
 def update_ads_with_factors(master_spec_bytes, ads_bytes, ads_is_csv, factor_rows, granular_df, lower, upper):
     """
     Updates the ADS file using factors and master spec mapping.
-    (Includes robust dynamic header finding for Master Spec)
+    (Includes robust dynamic header finding, 'nan' column fix, blank row fix, and preserves duplicate columns)
     """
+    # --- Helper specific to this function ---
+    def detect_col_by_substring(cols, substrings):
+        for c in cols:
+            low = str(c).lower()
+            for s in substrings:
+                if s.lower() in low:
+                    return c
+        return None
+
     # 1. LOAD MASTER SPEC
     # Use find_header_row_preview_bytes helper to ensure we skip empty rows/notes at the top
     hdr_master = find_header_row_preview_bytes(
@@ -527,9 +562,14 @@ def update_ads_with_factors(master_spec_bytes, ads_bytes, ads_is_csv, factor_row
         # Check "Include" column (handling various 'yes' formats)
         if str(r.get(inc_col, "")).lower() in ["y", "yes", "true", "1"]:
             v = str(r.get(var_col, "")).strip()
-            p = str(r.get(pmf_col_header, "")).strip()
-            if v and p:
-                var_to_pmf[v] = p
+            pmf_val = r.get(pmf_col_header)
+            
+            # Convert to string and clean it
+            s_pmf = str(pmf_val).strip()
+            
+            # Ensure it is NOT "nan", "none", or empty
+            if v and pd.notna(pmf_val) and s_pmf and s_pmf.lower() != "nan":
+                var_to_pmf[v] = s_pmf
 
     # 2. LOAD ADS
     try:
@@ -548,6 +588,7 @@ def update_ads_with_factors(master_spec_bytes, ads_bytes, ads_is_csv, factor_row
     else:
         df_ads = pd.read_excel(ads_bio, header=hdr_ads, dtype=object, engine="openpyxl")
 
+    # Clean columns BUT DO NOT DROP DUPLICATES (User Request)
     df_ads.columns = [str(c).strip() for c in df_ads.columns]
 
     # Find ADS cols using substring detection
@@ -578,7 +619,7 @@ def update_ads_with_factors(master_spec_bytes, ads_bytes, ads_is_csv, factor_row
     for (var, geo, period_raw, period_key, fval) in factor_rows:
         # Check Master Spec Inclusion
         if var not in var_to_pmf:
-            skipped_log.append([var, geo, period_raw, "Not in Master Spec"])
+            skipped_log.append([var, geo, period_raw, "Not in Master Spec (or PMF col invalid)"])
             continue
             
         target_col = var_to_pmf[var]
@@ -600,7 +641,8 @@ def update_ads_with_factors(master_spec_bytes, ads_bytes, ads_is_csv, factor_row
         mask = (ads_time_norm == period_key) & (df_ads[ads_geo_col].astype(str).str.strip() == geo)
         
         if mask.any():
-            # Convert to numeric, force errors to NaN, then fill NaNs with 1
+            # Convert to numeric, force errors (text/spaces) to NaN, then fill NaNs with 1
+            # This ensures that "Blank" * Factor = Factor (because 1 * Factor = Factor)
             df_ads[target_col] = pd.to_numeric(df_ads[target_col], errors='coerce').fillna(1)
             
             # Apply multiplication
