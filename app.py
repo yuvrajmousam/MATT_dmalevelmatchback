@@ -139,17 +139,18 @@ with tab_dma:
             
             # Smart defaults
             quotes_default = next((i for i, s in enumerate(dma_sheets) if "quotes" in s.lower() or "weekly" in s.lower()), 0)
-            support_default = next((i for i, s in enumerate(dma_sheets) if "support" in s.lower()), 0)
             
             st.divider()
-            c1, c2, c3 = st.columns(3)
+            
+            # --- UPDATE: Only 2 Columns now (Removed Support Dropdown) ---
+            c1, c2 = st.columns(2)
             with c1:
                 quotes_sheet = st.selectbox("Sheet for Quotes/Actuals:", dma_sheets, index=quotes_default)
             with c2:
-                support_sheet = st.selectbox("Sheet for Support:", dma_sheets, index=support_default)
-            with c3:
                 total_sheet_name = st.selectbox("Sheet for Total Incremental:", total_sheets, index=0)
-                
+            
+            st.caption("Note: 'Weekly Support 1' sheet is detected automatically from the DMA file.")
+
             if st.button("Load Model Keys & Types"):
                 with st.spinner("Loading..."):
                     opts = dma_get_options(dma_file.getvalue(), quotes_sheet)
@@ -171,8 +172,9 @@ with tab_dma:
                     placeholder.markdown(amfam_loader("Generating Factors..."), unsafe_allow_html=True)
                     
                     try:
+                        # --- UPDATE: Removed support_sheet argument ---
                         f_bytes, msg = dma_generate_factors(
-                            dma_file.getvalue(), quotes_sheet, support_sheet,
+                            dma_file.getvalue(), quotes_sheet,
                             total_file.getvalue(), total_sheet_name,
                             sel_keys, sel_types
                         )
