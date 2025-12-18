@@ -91,30 +91,20 @@ st.write(
 # ------------------------
 # Session state init
 # ------------------------
-state_keys = [
+for key in [
     "factor_summary", "factor_bytes", "factor_name", 
     "granular_bytes", "updated_granular_bytes", 
     "granular_log_bytes", "granular_summary", "granular_preview",
     "ads_updated_bytes", "ads_log_bytes", "ads_summary",
     "factor_processed_bytes", "factor_processed_summary",
     "dma_model_keys", "dma_types"
-]
-
-for key in state_keys:
+]:
     if key not in st.session_state:
         st.session_state[key] = None
 
 if "dma_model_keys" not in st.session_state or st.session_state.dma_model_keys is None:
     st.session_state.dma_model_keys = []
 if "dma_types" not in st.session_state or st.session_state.dma_types is None:
-    st.session_state.dma_types = []
-
-# --- NEW: CACHE RESET FUNCTION ---
-def reset_all_state():
-    """Wipes all processed data when a new file is uploaded."""
-    for key in state_keys:
-        st.session_state[key] = None
-    st.session_state.dma_model_keys = []
     st.session_state.dma_types = []
 
 # =========================
@@ -134,21 +124,9 @@ with tab_dma:
     col_dma1, col_dma2 = st.columns(2)
     
     with col_dma1:
-        # Added on_change=reset_all_state
-        dma_file = st.file_uploader(
-            "1. Upload DMA Summary (Actuals/Support)", 
-            type=["xlsx", "xls", "xlsb"], 
-            key="dma_main",
-            on_change=reset_all_state 
-        )
+        dma_file = st.file_uploader("1. Upload DMA Summary (Actuals/Support)", type=["xlsx", "xls", "xlsb"], key="dma_main")
     with col_dma2:
-        # Added on_change=reset_all_state
-        total_file = st.file_uploader(
-            "2. Upload Total Incremental File", 
-            type=["xlsx", "xls", "xlsb"], 
-            key="dma_total",
-            on_change=reset_all_state
-        )
+        total_file = st.file_uploader("2. Upload Total Incremental File", type=["xlsx", "xls", "xlsb"], key="dma_total")
 
     if dma_file and total_file:
         try:
@@ -164,6 +142,7 @@ with tab_dma:
             
             st.divider()
             
+            # --- UPDATE: Only 2 Columns now (Removed Support Dropdown) ---
             c1, c2 = st.columns(2)
             with c1:
                 quotes_sheet = st.selectbox("Sheet for Quotes/Actuals:", dma_sheets, index=quotes_default)
@@ -193,6 +172,7 @@ with tab_dma:
                     placeholder.markdown(amfam_loader("Generating Factors..."), unsafe_allow_html=True)
                     
                     try:
+                        # --- UPDATE: Removed support_sheet argument ---
                         f_bytes, msg = dma_generate_factors(
                             dma_file.getvalue(), quotes_sheet,
                             total_file.getvalue(), total_sheet_name,
@@ -225,18 +205,12 @@ with tab_dma:
 with tab_factor:
     st.header("Step 1: Process Factor File")
     
-    # Added on_change=reset_all_state
-    factor_up = st.file_uploader(
-        "Upload Factor Workbook (or use generated)", 
-        type=["xlsx", "xls"], 
-        key="factor_up",
-        on_change=reset_all_state
-    )
+    factor_up = st.file_uploader("Upload Factor Workbook (or use generated)", type=["xlsx", "xls"], key="factor_up")
     
     if factor_up:
         st.session_state.factor_bytes = factor_up.getvalue()
         st.session_state.factor_name = factor_up.name
-        # Note: reset_all_state cleared factor_summary, so we regenerate below
+        st.session_state.factor_summary = None # reset
         
     eff_bytes = st.session_state.factor_bytes
     
@@ -290,7 +264,6 @@ with tab_granular:
     if not st.session_state.factor_bytes:
         st.warning("No factor file in memory. Go to Step 0 or 1.")
     else:
-        # Granular upload doesn't strictly need reset_all_state unless you want to force re-run of this tab
         gran_file = st.file_uploader("Upload Granular Workbook", type=["xlsx", "xls"], key="gran_up")
         
         c1, c2 = st.columns(2)
